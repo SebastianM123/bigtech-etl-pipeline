@@ -1,0 +1,10 @@
+version: "3.8"
+
+services:
+  etl-pipeline:
+    build: .
+    container_name: bigtech-etl-pipeline
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
