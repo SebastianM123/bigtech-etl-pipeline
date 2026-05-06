@@ -1,12 +1,14 @@
 # US Big Tech Stock Market ETL Pipeline
 
+![CI](https://github.com/SebastianM123/bigtech-etl-pipeline/actions/workflows/ci.yml/badge.svg)
+
 End-to-end ETL pipeline that fetches daily stock market data for the largest US tech companies, processes it through a medallion architecture (Bronze → Silver → Gold), and produces business-ready metrics using PySpark on Databricks with Delta Lake.
 
 ## Project Overview
 
 This project demonstrates a production-grade data engineering workflow by building a complete ETL pipeline for US Big Tech stock market data (AAPL, MSFT, GOOGL, AMZN, META, NVDA, TSLA, NFLX, AMD, INTC). The pipeline extracts raw market data from Yahoo Finance, applies a medallion architecture to progressively clean and enrich the data, and produces analytical tables with key financial metrics.
 
-**Why this project?** It mirrors real-world data engineering tasks: working with streaming-like time-series data, implementing layered data architectures, writing efficient distributed transformations, and delivering business-ready datasets for analytics.
+**Why this project?** It mirrors real-world data engineering tasks: working with streaming-like time-series data, implementing layered data architectures, writing efficient distributed transformations, validating data quality between layers, and delivering business-ready datasets for analytics.
 
 ## Tech Stack
 
@@ -16,6 +18,9 @@ This project demonstrates a production-grade data engineering workflow by buildi
 | **Processing** | Apache Spark (PySpark) | Distributed data transformations |
 | **Storage** | Delta Lake | ACID-compliant table format with versioning |
 | **Platform** | Databricks (Community Edition) | Managed Spark environment |
+| **Data Quality** | Pandera | Schema validation between pipeline layers |
+| **Testing** | Pytest | Unit tests for transformation logic |
+| **CI/CD** | GitHub Actions | Automated testing on every push |
 | **Containerization** | Docker, Docker Compose | Reproducible, portable execution environment |
 | **Orchestration** | Python scripts + Databricks Notebooks | Pipeline execution |
 | **Version Control** | Git, GitHub | Source code management |
@@ -33,7 +38,7 @@ The pipeline follows the **Medallion Architecture** pattern — a standard desig
                          • As-is from API        • Deduplicated          • Daily returns
                          • Timestamped files     • Type-enforced         • Moving averages
                          • No transformations    • Null handling         • 30d volatility
-                                                 • Standardized          • Company ranking
+                                                 • Schema validated      • Company ranking
 ```
 
 ### Layer Responsibilities
@@ -47,6 +52,7 @@ The pipeline follows the **Medallion Architecture** pattern — a standard desig
 - Removes duplicates (by ticker + date)
 - Handles missing values (drops rows with null prices, fills null volume with 0)
 - Standardizes data types (dates, numeric precision)
+- Validated against a Pandera schema before being written
 - Sorted and ready for business logic
 
 **Gold Layer** — *Business-ready analytics*
@@ -62,11 +68,15 @@ The pipeline follows the **Medallion Architecture** pattern — a standard desig
 
 ```
 bigtech-etl-pipeline/
+├── .github/
+│   └── workflows/
+│       └── ci.yml                   # GitHub Actions: run tests on every push
 ├── src/
 │   ├── extract/
 │   │   └── fetch_stock_data.py      # Extracts data from Yahoo Finance → Bronze
 │   ├── transform/
-│   │   └── transform_stock_data.py  # Bronze → Silver → Gold transformations
+│   │   ├── transform_stock_data.py  # Bronze → Silver → Gold transformations
+│   │   └── schemas.py               # Pandera validation schemas
 │   ├── load/                        # (Reserved for future: cloud storage load)
 │   └── run_pipeline.py              # Main pipeline orchestrator
 ├── notebooks/
@@ -75,7 +85,11 @@ bigtech-etl-pipeline/
 │   ├── bronze/                      # Raw snapshots (timestamped CSVs)
 │   ├── silver/                      # Cleaned data
 │   └── gold/                        # Business metrics
-├── tests/                           # Unit tests (future work)
+├── tests/
+│   ├── conftest.py                  # Shared pytest fixtures
+│   ├── test_extract.py              # Tests for the extraction module
+│   └── test_transform.py            # Tests for Silver/Gold transformations
+├── pyproject.toml                   # Project metadata & pytest configuration
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -135,6 +149,34 @@ After running, output files will be available in:
    - `bigtech_gold_daily_metrics`
    - `bigtech_gold_company_summary`
 
+## Testing
+
+The project ships with a `pytest` test suite covering both the extraction and transformation layers.
+
+```bash
+pip install pytest
+pytest
+```
+
+The suite includes 20 unit tests:
+
+- **Transformation tests** verify deduplication, null handling, rounding, sorting, daily-return math, summary aggregation, and schema rejection of unknown tickers.
+- **Extraction tests** use a fake fetcher (dependency injection) to exercise the orchestration logic without hitting the real Yahoo Finance API — making the suite fast, deterministic, and offline-runnable.
+
+Tests run automatically on every push and pull request via GitHub Actions (see `.github/workflows/ci.yml`).
+
+## Data Quality
+
+Data quality is enforced with **Pandera** schemas (`src/transform/schemas.py`). At the end of the Silver transformation, the DataFrame is validated against a contract that checks:
+
+- Tickers are within the allowed whitelist
+- All price columns (`open`, `high`, `low`, `close`) are positive
+- `volume` is non-negative integer
+- `date` is a proper datetime
+- No unexpected columns are present (`strict=True`)
+
+If any rule is violated, the pipeline fails fast with a precise error — preventing bad data from silently propagating into the Gold layer and corrupting downstream metrics.
+
 ## Key Design Decisions
 
 ### Why the Medallion Architecture?
@@ -151,6 +193,9 @@ While pandas works fine for this dataset size, PySpark was chosen to reflect rea
 
 ### Why Window Functions for metrics?
 Moving averages, volatility, and daily returns are inherently sequential per ticker. Window functions (`Window.partitionBy("ticker").orderBy("date")`) express this natively in Spark, are highly optimized, and translate directly to equivalent SQL — making the code easy to review and maintain.
+
+### Why pure functions for transformations?
+The local Python pipeline keeps transformation logic (`transform_to_silver`, `transform_to_gold`) free of file I/O. I/O is handled by separate helper functions. This separation makes the core logic trivially unit-testable with hand-crafted DataFrames — no temporary files, no network mocking required for the transformation layer.
 
 ### Why a dual local + Databricks implementation?
 Local development with pandas enables fast iteration and debugging without cluster startup costs. The Databricks notebook then validates the same logic works at scale with Spark. This mirrors how teams often prototype locally before deploying to cloud infrastructure.
@@ -179,14 +224,11 @@ LIMIT 5;
 
 Possible extensions to take this project closer to a full production system:
 
+- **Orchestration** — migrate from manual notebook runs to Apache Airflow with a scheduled DAG
 - **Incremental loads** — use Delta Lake `MERGE` for upsert logic instead of full overwrites
-- **Orchestration** — migrate from manual notebook runs to Databricks Workflows or Apache Airflow
-- **CI/CD** — GitHub Actions for automated testing and deployment
-- **Data quality checks** — integrate Great Expectations or Delta Live Tables for data validation
-- **Azure deployment** — run the pipeline on Azure Data Lake Storage instead of local Delta tables
-- **Unit tests** — add pytest-based tests for transformation logic
-- **Dashboard** — connect Gold tables to Power BI or Databricks SQL dashboards for visualization
+- **Azure deployment** — run the pipeline on Azure Data Lake Storage Gen2 with Azure Databricks
+- **Secrets management** — integrate Azure Key Vault or Databricks Secrets for credentials
 
-## 👤 Author
+## Author
 
 Built by **Sebastian Michulec** as a portfolio project.

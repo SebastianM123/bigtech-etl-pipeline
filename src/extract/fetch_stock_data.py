@@ -1,6 +1,9 @@
 """
-Extract module — fetches daily stock data for US Big Tech companies
-from Yahoo Finance and saves raw snapshots to the Bronze layer.
+Fetch daily stock data for US Big Tech tickers from Yahoo Finance and save
+the raw response to the Bronze layer.
+
+The Yahoo API call is isolated in `_fetch_single_ticker` so it can be replaced
+with a fake fetcher in unit tests, removing the network dependency.
 """
 
 import yfinance as yf
@@ -9,6 +12,7 @@ from datetime import datetime, timedelta
 import os
 import logging
 
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -16,15 +20,59 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TICKERS = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META",
-    "NVDA", "TSLA", "NFLX", "AMD", "INTC",
+    "AAPL",   # Apple
+    "MSFT",   # Microsoft
+    "GOOGL",  # Alphabet
+    "AMZN",   # Amazon
+    "META",   # Meta
+    "NVDA",   # NVIDIA
+    "TSLA",   # Tesla
+    "NFLX",   # Netflix
+    "AMD",    # AMD
+    "INTC",   # Intel
 ]
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BRONZE_PATH = os.path.join(PROJECT_ROOT, "data", "bronze")
 
+COLUMN_RENAMES = {
+    "Date": "date",
+    "Open": "open",
+    "High": "high",
+    "Low": "low",
+    "Close": "close",
+    "Volume": "volume",
+}
+EXPECTED_COLUMNS = ["ticker", "date", "open", "high", "low", "close", "volume"]
 
-def fetch_stock_data(tickers=TICKERS, period_days=365):
+
+# --- Helpers ---
+
+
+def normalize_yahoo_dataframe(raw_df, ticker):
+    """Rename Yahoo columns to lowercase, add ticker, return canonical schema."""
+    df = raw_df.reset_index()
+    df["ticker"] = ticker
+    df = df.rename(columns=COLUMN_RENAMES)
+    return df[EXPECTED_COLUMNS]
+
+
+def _fetch_single_ticker(ticker, start_date, end_date):
+    """Network call to Yahoo Finance — isolated so tests can replace it
+    via the `fetch_fn` parameter of fetch_stock_data."""
+    stock = yf.Ticker(ticker)
+    return stock.history(start=start_date, end=end_date)
+
+
+# --- Orchestration ---
+
+
+def fetch_stock_data(tickers=TICKERS, period_days=365, fetch_fn=_fetch_single_ticker):
+    """Fetch historical daily data for all tickers and combine into one DataFrame.
+
+    `fetch_fn` is injected so tests can pass a fake fetcher and avoid hitting
+    the real Yahoo Finance API.
+    """
     end_date = datetime.today()
     start_date = end_date - timedelta(days=period_days)
 
@@ -38,25 +86,13 @@ def fetch_stock_data(tickers=TICKERS, period_days=365):
     for ticker in tickers:
         try:
             logger.info(f"  Downloading: {ticker}")
-            stock = yf.Ticker(ticker)
-            df = stock.history(start=start_date, end=end_date)
+            raw_df = fetch_fn(ticker, start_date, end_date)
 
-            if df.empty:
+            if raw_df.empty:
                 logger.warning(f"  No data returned for {ticker}")
                 continue
 
-            df = df.reset_index()
-            df["ticker"] = ticker
-            df = df.rename(columns={
-                "Date": "date",
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Volume": "volume",
-            })
-            df = df[["ticker", "date", "open", "high", "low", "close", "volume"]]
-
+            df = normalize_yahoo_dataframe(raw_df, ticker)
             all_data.append(df)
             logger.info(f"  Done {ticker}: {len(df)} rows")
 
@@ -74,7 +110,6 @@ def fetch_stock_data(tickers=TICKERS, period_days=365):
 def save_to_bronze(df):
     os.makedirs(BRONZE_PATH, exist_ok=True)
 
-    # Timestamped filenames preserve historical snapshots for reprocessing
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"stocks_raw_{timestamp}.csv"
     filepath = os.path.join(BRONZE_PATH, filename)

@@ -1,0 +1,9 @@
+[project]
+name = "bigtech-etl-pipeline"
+version = "0.1.0"
+description = "ETL pipeline for US Big Tech stock market data using the medallion architecture (Bronze/Silver/Gold)."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

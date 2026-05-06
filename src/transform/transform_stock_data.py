@@ -1,14 +1,19 @@
 """
-Transform module — processes stock data through Silver and Gold layers.
+Transform stock data through Silver and Gold layers.
 
-Silver: cleaned, deduplicated, type-enforced data.
-Gold: business metrics — moving averages, volatility, daily returns, company rankings.
+Silver: cleaned, deduplicated, properly typed.
+Gold:   business metrics — daily returns, moving averages, volatility, rankings.
+
+Transformation functions are pure (DataFrame in, DataFrame out) so they can
+be unit-tested without filesystem or network access.
 """
 
 import pandas as pd
 import os
 import logging
 import glob
+
+from transform.schemas import silver_schema
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,7 +27,11 @@ SILVER_PATH = os.path.join(PROJECT_ROOT, "data", "silver")
 GOLD_PATH = os.path.join(PROJECT_ROOT, "data", "gold")
 
 
+# --- I/O helpers ---
+
+
 def get_latest_bronze_file():
+    """Return the path to the most recent Bronze layer CSV."""
     files = glob.glob(os.path.join(BRONZE_PATH, "stocks_raw_*.csv"))
     if not files:
         raise FileNotFoundError("No Bronze layer files found.")
@@ -31,13 +40,42 @@ def get_latest_bronze_file():
     return latest
 
 
-def transform_to_silver(bronze_filepath):
+def load_bronze_csv(filepath):
+    return pd.read_csv(filepath)
+
+
+def save_silver(df):
+    os.makedirs(SILVER_PATH, exist_ok=True)
+    filepath = os.path.join(SILVER_PATH, "stocks_cleaned.csv")
+    df.to_csv(filepath, index=False)
+    logger.info(f"  Silver saved: {filepath}")
+    return filepath
+
+
+def save_gold(gold_tables):
+    os.makedirs(GOLD_PATH, exist_ok=True)
+    paths = []
+    for name, df in gold_tables.items():
+        filepath = os.path.join(GOLD_PATH, f"{name}.csv")
+        df.to_csv(filepath, index=(name == "company_summary"))
+        logger.info(f"  Gold saved: {filepath}")
+        paths.append(filepath)
+    return paths
+
+
+# --- Transformations ---
+
+
+def transform_to_silver(df):
+    """Clean and standardize raw Bronze data: parse dates, deduplicate,
+    drop nulls, fill volume, round prices, sort, and validate against the schema."""
     logger.info("SILVER LAYER: Starting transformations...")
 
-    df = pd.read_csv(bronze_filepath)
+    df = df.copy()
     initial_rows = len(df)
     logger.info(f"  Read {initial_rows} rows from Bronze")
 
+    # 1. Parse dates and drop timezone info
     df["date"] = pd.to_datetime(df["date"], utc=True).dt.date
     df["date"] = pd.to_datetime(df["date"])
 
@@ -52,18 +90,26 @@ def transform_to_silver(bronze_filepath):
     if nulls_before > 0:
         logger.info(f"  Dropped {nulls_before} rows with null prices")
 
-    df["volume"] = df["volume"].fillna(0).astype(int)
+    df["volume"] = df["volume"].fillna(0).astype("int64")
 
     for col in price_cols:
         df[col] = df[col].round(2)
 
     df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
 
+    df = silver_schema.validate(df)
+
     logger.info(f"  Silver layer: {len(df)} clean rows")
     return df
 
 
 def transform_to_gold(silver_df):
+    """Compute business metrics from Silver data.
+
+    Returns a dict with two DataFrames:
+        - daily_metrics:   per-ticker per-day metrics (returns, moving averages, etc.)
+        - company_summary: per-ticker aggregates (avg close, total volume, etc.)
+    """
     logger.info("GOLD LAYER: Computing business metrics...")
 
     df = silver_df.copy()
@@ -116,7 +162,6 @@ def transform_to_gold(silver_df):
     ).round(2)
 
     summary = summary.sort_values("avg_volatility", ascending=False)
-
     logger.info(f"  Company summary: {len(summary)} companies")
 
     return {
@@ -125,23 +170,7 @@ def transform_to_gold(silver_df):
     }
 
 
-def save_silver(df):
-    os.makedirs(SILVER_PATH, exist_ok=True)
-    filepath = os.path.join(SILVER_PATH, "stocks_cleaned.csv")
-    df.to_csv(filepath, index=False)
-    logger.info(f"  Silver saved: {filepath}")
-    return filepath
-
-
-def save_gold(gold_tables):
-    os.makedirs(GOLD_PATH, exist_ok=True)
-    paths = []
-    for name, df in gold_tables.items():
-        filepath = os.path.join(GOLD_PATH, f"{name}.csv")
-        df.to_csv(filepath, index=True if name == "company_summary" else False)
-        logger.info(f"  Gold saved: {filepath}")
-        paths.append(filepath)
-    return paths
+# --- Pipeline ---
 
 
 def run_transformations():
@@ -151,7 +180,8 @@ def run_transformations():
 
     bronze_file = get_latest_bronze_file()
 
-    silver_df = transform_to_silver(bronze_file)
+    bronze_df = load_bronze_csv(bronze_file)
+    silver_df = transform_to_silver(bronze_df)
     save_silver(silver_df)
 
     gold_tables = transform_to_gold(silver_df)
