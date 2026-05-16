@@ -173,23 +173,36 @@ def transform_to_gold(silver_df):
 # --- Pipeline ---
 
 
-def run_transformations():
+def run_silver_transformation():
+    """Bronze -> Silver: load latest Bronze file, clean, save Silver."""
     logger.info("=" * 50)
-    logger.info("STARTING TRANSFORMATIONS")
+    logger.info("SILVER TRANSFORMATION")
     logger.info("=" * 50)
 
     bronze_file = get_latest_bronze_file()
-
     bronze_df = load_bronze_csv(bronze_file)
     silver_df = transform_to_silver(bronze_df)
     save_silver(silver_df)
 
+
+def run_gold_transformation():
+    """Silver -> Gold: load Silver, compute metrics, save Gold."""
+    logger.info("=" * 50)
+    logger.info("GOLD TRANSFORMATION")
+    logger.info("=" * 50)
+
+    silver_filepath = os.path.join(SILVER_PATH, "stocks_cleaned.csv")
+    silver_df = pd.read_csv(silver_filepath)
+    silver_df["date"] = pd.to_datetime(silver_df["date"])
+
     gold_tables = transform_to_gold(silver_df)
     save_gold(gold_tables)
 
-    logger.info("=" * 50)
-    logger.info("TRANSFORMATIONS COMPLETE")
-    logger.info("=" * 50)
+
+def run_transformations():
+    """Run both Silver and Gold sequentially. Used by the local pipeline runner."""
+    run_silver_transformation()
+    run_gold_transformation()
 
 
 if __name__ == "__main__":

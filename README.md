@@ -2,13 +2,13 @@
 
 ![CI](https://github.com/SebastianM123/bigtech-etl-pipeline/actions/workflows/ci.yml/badge.svg)
 
-End-to-end ETL pipeline that fetches daily stock market data for the largest US tech companies, processes it through a medallion architecture (Bronze → Silver → Gold), and produces business-ready metrics using PySpark on Databricks with Delta Lake.
+End-to-end ETL pipeline that fetches daily stock market data for the largest US tech companies, processes it through a medallion architecture (Bronze → Silver → Gold), and produces business-ready metrics. The pipeline is orchestrated with Apache Airflow and has a parallel PySpark implementation for Databricks with Delta Lake.
 
 ## Project Overview
 
 This project demonstrates a production-grade data engineering workflow by building a complete ETL pipeline for US Big Tech stock market data (AAPL, MSFT, GOOGL, AMZN, META, NVDA, TSLA, NFLX, AMD, INTC). The pipeline extracts raw market data from Yahoo Finance, applies a medallion architecture to progressively clean and enrich the data, and produces analytical tables with key financial metrics.
 
-**Why this project?** It mirrors real-world data engineering tasks: working with streaming-like time-series data, implementing layered data architectures, writing efficient distributed transformations, validating data quality between layers, and delivering business-ready datasets for analytics.
+**Why this project?** It mirrors real-world data engineering tasks: working with streaming-like time-series data, implementing layered data architectures, writing efficient distributed transformations, validating data quality between layers, orchestrating scheduled runs, and delivering business-ready datasets for analytics.
 
 ## Tech Stack
 
@@ -18,11 +18,11 @@ This project demonstrates a production-grade data engineering workflow by buildi
 | **Processing** | Apache Spark (PySpark) | Distributed data transformations |
 | **Storage** | Delta Lake | ACID-compliant table format with versioning |
 | **Platform** | Databricks (Community Edition) | Managed Spark environment |
+| **Orchestration** | Apache Airflow | Scheduled DAG runs, retries, monitoring |
 | **Data Quality** | Pandera | Schema validation between pipeline layers |
 | **Testing** | Pytest | Unit tests for transformation logic |
 | **CI/CD** | GitHub Actions | Automated testing on every push |
 | **Containerization** | Docker, Docker Compose | Reproducible, portable execution environment |
-| **Orchestration** | Python scripts + Databricks Notebooks | Pipeline execution |
 | **Version Control** | Git, GitHub | Source code management |
 | **Analysis** | Spark SQL | Ad-hoc queries on Gold layer |
 
@@ -40,6 +40,8 @@ The pipeline follows the **Medallion Architecture** pattern — a standard desig
                          • No transformations    • Null handling         • 30d volatility
                                                  • Schema validated      • Company ranking
 ```
+
+The flow between layers is orchestrated by an Airflow DAG (`extract → transform_silver → transform_gold`), scheduled to run daily with automatic retries on failure.
 
 ### Layer Responsibilities
 
@@ -71,6 +73,8 @@ bigtech-etl-pipeline/
 ├── .github/
 │   └── workflows/
 │       └── ci.yml                   # GitHub Actions: run tests on every push
+├── dags/
+│   └── bigtech_etl_dag.py           # Airflow DAG: orchestrates the pipeline
 ├── src/
 │   ├── extract/
 │   │   └── fetch_stock_data.py      # Extracts data from Yahoo Finance → Bronze
@@ -78,7 +82,7 @@ bigtech-etl-pipeline/
 │   │   ├── transform_stock_data.py  # Bronze → Silver → Gold transformations
 │   │   └── schemas.py               # Pandera validation schemas
 │   ├── load/                        # (Reserved for future: cloud storage load)
-│   └── run_pipeline.py              # Main pipeline orchestrator
+│   └── run_pipeline.py              # Main pipeline orchestrator (manual run)
 ├── notebooks/
 │   └── bigtech_etl_databricks.py    # PySpark pipeline on Databricks
 ├── data/
@@ -89,40 +93,79 @@ bigtech-etl-pipeline/
 │   ├── conftest.py                  # Shared pytest fixtures
 │   ├── test_extract.py              # Tests for the extraction module
 │   └── test_transform.py            # Tests for Silver/Gold transformations
+├── docs/
+│   └── images/                      # Screenshots used in this README
 ├── pyproject.toml                   # Project metadata & pytest configuration
-├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml               # Airflow services (postgres, scheduler, webserver)
+├── Dockerfile                       # Image for the standalone pipeline run
 ├── requirements.txt
+├── .env.example                     # Template for environment variables
 ├── .gitignore
 └── README.md
 ```
 
 The project contains **two parallel implementations** of the same pipeline:
-- **Local Python version** (`src/`) — uses pandas for transformations, writes CSV files
+- **Local Python version** (`src/`) — uses pandas for transformations, writes CSV files, orchestrated by Airflow
 - **Databricks PySpark version** (`notebooks/`) — uses distributed Spark, writes Delta tables
 
 This dual approach demonstrates both a lightweight local development workflow and a production-grade cloud implementation using the same medallion architecture.
 
+## Orchestration with Airflow
+
+The pipeline is orchestrated by an **Apache Airflow** DAG defined in `dags/bigtech_etl_dag.py`. The DAG consists of three sequential tasks:
+
+```
+extract  →  transform_silver  →  transform_gold
+```
+
+![Airflow DAG](docs/images/airflow_dag.png)
+
+Each task is a `PythonOperator` that calls the corresponding function from the `src/` modules. Key configuration:
+
+- **Schedule** — runs daily (`@daily`)
+- **Retries** — each task retries twice with a 5-minute delay, protecting against transient Yahoo Finance API failures
+- **catchup=False** — only forward runs are scheduled; no historical backfill on deploy
+
+Airflow runs as a set of Docker services (PostgreSQL for metadata, a scheduler, and a webserver), so the entire orchestration environment is reproducible with a single command.
+
 ## How to Run
 
 ### Prerequisites
-- Python 3.9+
-- Git
-- Docker (optional)
-- Databricks Community Edition account (optional)
+- Docker and Docker Compose
+- Python 3.9+ (only for the standalone local run)
+- Databricks Community Edition account (optional, for the PySpark version)
 
-### Docker (recommended)
+### Airflow (recommended)
+
+This is the primary way to run the pipeline — it brings up Airflow and all supporting services.
 
 ```bash
 git clone https://github.com/SebastianM123/bigtech-etl-pipeline.git
 cd bigtech-etl-pipeline
 
-docker compose up --build
+# Create the .env file from the template
+cp .env.example .env
+
+# Start Airflow (postgres + scheduler + webserver)
+docker compose up -d
 ```
 
-Output files will be available in `data/bronze/`, `data/silver/`, and `data/gold/` on your local machine thanks to volume mounting.
+Once the services are healthy (this takes a few minutes on first run):
 
-### Local Pipeline (pandas)
+1. Open the Airflow UI at [http://localhost:8080](http://localhost:8080)
+2. Log in with `admin` / `admin`
+3. Unpause the `bigtech_etl` DAG and trigger it manually, or wait for the scheduled run
+4. Output files appear in `data/bronze/`, `data/silver/`, and `data/gold/`
+
+To stop all services:
+
+```bash
+docker compose down
+```
+
+### Local Pipeline (pandas, no Airflow)
+
+For a quick run of the pipeline logic without the orchestration layer:
 
 ```bash
 git clone https://github.com/SebastianM123/bigtech-etl-pipeline.git
@@ -182,6 +225,9 @@ If any rule is violated, the pipeline fails fast with a precise error — preven
 ### Why the Medallion Architecture?
 Splitting the pipeline into Bronze/Silver/Gold layers provides clear separation of concerns and makes the pipeline debuggable and idempotent. If a bug is found in Gold logic, we can reprocess from Silver without re-fetching from the source API — saving time and reducing load on external systems.
 
+### Why Airflow for orchestration?
+Running the pipeline as a scheduled Airflow DAG turns a set of manual scripts into a real production pipeline: runs happen automatically on schedule, failed tasks retry on their own, task dependencies are enforced (Silver never runs if Extract failed), and every run is logged and visible in the UI for monitoring and debugging.
+
 ### Why Delta Lake over plain Parquet/CSV?
 Delta Lake provides ACID transactions, schema enforcement, and time travel. In a production context, this means:
 - Failed writes don't corrupt data (transactional guarantees)
@@ -213,18 +259,27 @@ The pipeline enables analytical queries like:
 **Intraday volatility** — the `daily_range_pct` metric highlights stocks with wide intraday price swings, often indicating higher trading risk.
 
 Example query:
-```sql
-SELECT ticker, latest_close, avg_volatility, pct_days_above_ma30
-FROM bigtech_gold_company_summary
-ORDER BY avg_volatility DESC
-LIMIT 5;
-```
+````sql
+-- For each company, count its 'big move' days (daily change over 5%)
+-- and show only companies that had more than 10 such days.
+SELECT
+    d.ticker,
+    s.avg_volatility,
+    COUNT(*) AS big_move_days,
+    ROUND(MAX(ABS(d.daily_return_pct)), 2) AS largest_move
+FROM bigtech_gold_daily_metrics d
+JOIN bigtech_gold_company_summary s
+    ON d.ticker = s.ticker
+WHERE ABS(d.daily_return_pct) > 5
+GROUP BY d.ticker, s.avg_volatility
+HAVING COUNT(*) > 10
+ORDER BY big_move_days DESC;
+````
 
 ## Future Improvements
 
 Possible extensions to take this project closer to a full production system:
 
-- **Orchestration** — migrate from manual notebook runs to Apache Airflow with a scheduled DAG
 - **Incremental loads** — use Delta Lake `MERGE` for upsert logic instead of full overwrites
 - **Azure deployment** — run the pipeline on Azure Data Lake Storage Gen2 with Azure Databricks
 - **Secrets management** — integrate Azure Key Vault or Databricks Secrets for credentials
